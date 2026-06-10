@@ -1,0 +1,39 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark gray square background -->
+  <rect width="256" height="256" rx="32" fill="#1a1a1a"/>
+  
+  <!-- Main spiral with mint green color -->
+  <g filter="url(#glow)">
+    <!-- Outer circle -->
+    <circle 
+      cx="128" 
+      cy="128" 
+      r="100" 
+      stroke="#9DC08B" 
+      stroke-width="8"
+      fill="transparent"
+    />
+    
+    <!-- Spiral curve -->
+    <path 
+      d="M128 48C128 48 88 108 128 168C168 108 128 48 128 48Z" 
+      stroke="#9DC08B" 
+      stroke-width="8" 
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    
+    <!-- Dots -->
+    <circle cx="128" cy="88" r="6" fill="#9DC08B"/>
+    <circle cx="128" cy="128" r="6" fill="#9DC08B"/>
+    <circle cx="128" cy="168" r="6" fill="#9DC08B"/>
+  </g>
+
+  <!-- Subtle glow effect -->
+  <defs>
+    <filter id="glow" x="-10" y="-10" width="276" height="276">
+      <feGaussianBlur stdDeviation="1" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+</svg> 
