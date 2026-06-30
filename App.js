@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ScrollView, ActivityIndicator, Alert, Animated, Platform } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ScrollView, ActivityIndicator, Alert, Animated, Platform, Linking } from 'react-native';
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -21,6 +21,15 @@ import { queryHuggingFace } from './huggingface';
 
 const Stack = createStackNavigator();
 const ACCENT_COLOR = '#9DC08B';
+
+const SUGGESTIONS = [
+  { emoji: '🌬️', text: 'Guided breathing exercise' },
+  { emoji: '🧘', text: 'Start mindful meditation' },
+  { emoji: '📋', text: 'Grounding exercise' },
+  { emoji: '😢', text: 'I am feeling overwhelmed' },
+  { emoji: '📊', text: 'Tell me about my mood trends' },
+  { emoji: '🌸', text: 'How do I track my cycle?' }
+];
 
 // Simple MoodButton component
 const MoodButton = ({ emoji, label, onPress, isSelected }) => {
@@ -84,6 +93,100 @@ const MoodButton = ({ emoji, label, onPress, isSelected }) => {
   );
 };
 
+// Pulsing Waveform for Microphone Active State
+const VoiceVisualizer = () => {
+  const animations = useRef([
+    new Animated.Value(15),
+    new Animated.Value(30),
+    new Animated.Value(10),
+    new Animated.Value(45),
+    new Animated.Value(20),
+    new Animated.Value(35),
+    new Animated.Value(15),
+  ]).current;
+
+  useEffect(() => {
+    const loops = animations.map((anim, idx) => {
+      return Animated.loop(
+        Animated.sequence([
+          Animated.timing(anim, {
+            toValue: Math.random() * 45 + 15,
+            duration: 150 + idx * 40,
+            useNativeDriver: false,
+          }),
+          Animated.timing(anim, {
+            toValue: Math.random() * 15 + 5,
+            duration: 150 + idx * 40,
+            useNativeDriver: false,
+          })
+        ])
+      );
+    });
+
+    Animated.parallel(loops).start();
+
+    return () => {
+      loops.forEach(l => l.stop());
+    };
+  }, []);
+
+  return (
+    <View style={styles.voiceVisualizerContainer}>
+      <Text style={styles.voiceListeningText}>Listening to your voice...</Text>
+      <View style={styles.voiceWaves}>
+        {animations.map((anim, idx) => (
+          <Animated.View 
+            key={idx} 
+            style={[
+              styles.voiceWaveBar, 
+              { height: anim }
+            ]} 
+          />
+        ))}
+      </View>
+    </View>
+  );
+};
+
+// Safety Escalation Modal Component
+const SafetyModal = ({ visible, onClose }) => {
+  if (!visible) return null;
+  return (
+    <View style={styles.safetyOverlay}>
+      <View style={styles.safetyCard}>
+        <Ionicons name="warning-outline" size={48} color="#E88383" style={{ marginBottom: 15 }} />
+        <Text style={styles.safetyTitle}>We Care About You</Text>
+        <Text style={styles.safetyDescription}>
+          It sounds like you might be going through a very difficult time. Please know that you are not alone, and there is immediate support available.
+        </Text>
+        
+        <TouchableOpacity 
+          style={[styles.safetyButton, { backgroundColor: '#E88383' }]} 
+          onPress={() => Linking.openURL('tel:988')}
+        >
+          <Ionicons name="call-outline" size={20} color="#fff" />
+          <Text style={styles.safetyButtonText}>Call 988 Suicide Line</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.safetyButton, { backgroundColor: '#333', marginTop: 10 }]} 
+          onPress={() => Linking.openURL('sms:741741')}
+        >
+          <Ionicons name="chatbubble-ellipses-outline" size={20} color="#fff" />
+          <Text style={styles.safetyButtonText}>Text HOME to 741741</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={styles.safetyCloseButton} 
+          onPress={onClose}
+        >
+          <Text style={styles.safetyCloseText}>Back to App</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+};
+
 // HomeScreen component
 function HomeScreen({ navigation }) {
   const scrollViewRef = useRef(null);
@@ -91,6 +194,8 @@ function HomeScreen({ navigation }) {
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [isMessageLoading, setIsMessageLoading] = useState(false);
+  const [showSafetyModal, setShowSafetyModal] = useState(false);
+  
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
 
@@ -101,7 +206,7 @@ function HomeScreen({ navigation }) {
     },
     onError: (err) => {
       console.warn('Speech recognition error:', err);
-      Alert.alert('Voice Input Info', 'Speech recognition was interrupted or is not configured. Please type your message.');
+      Alert.alert('Voice Input Info', 'Speech recognition was interrupted. You can type your message.');
     }
   });
 
@@ -121,11 +226,21 @@ function HomeScreen({ navigation }) {
     ]).start();
   }, []);
 
-  // Update your message handling function
-  const handleSendMessage = async () => {
-    const trimmedMessage = message.trim();
+  const checkDistress = (text) => {
+    const distressKeywords = ['suicide', 'self-harm', 'kill myself', 'end my life', 'hurt myself', 'want to die', 'overdose', 'cut myself', 'hang myself'];
+    const cleaned = text.toLowerCase();
+    return distressKeywords.some(kw => cleaned.includes(kw));
+  };
+
+  const handleSendDirectMessage = async (msgText) => {
+    const trimmedMessage = msgText.trim();
     if (!trimmedMessage) return;
     if (!auth.currentUser) return;
+
+    // Check distress for crisis trigger
+    if (checkDistress(trimmedMessage)) {
+      setShowSafetyModal(true);
+    }
 
     const userMessageId = Date.now().toString();
     const userTimestamp = new Date().toISOString();
@@ -194,6 +309,10 @@ function HomeScreen({ navigation }) {
     }
   };
 
+  const handleSendMessage = () => {
+    handleSendDirectMessage(message);
+  };
+
   const handleReaction = async (messageId, reaction) => {
     try {
       const messageRef = doc(db, 'messages', messageId);
@@ -257,7 +376,7 @@ function HomeScreen({ navigation }) {
             }
           }}
         >
-          <Ionicons name="log-out-outline" size={24} color="#fff" />
+          <Ionicons name="log-out-outline" size={22} color="#fff" />
         </TouchableOpacity>
       ),
       headerRight: () => (
@@ -266,19 +385,19 @@ function HomeScreen({ navigation }) {
             style={styles.headerButton}
             onPress={() => navigation.navigate('Stats')}
           >
-            <Ionicons name="stats-chart" size={24} color="#fff" />
+            <Ionicons name="stats-chart" size={20} color="#fff" />
           </TouchableOpacity>
           <TouchableOpacity 
             style={styles.headerButton}
             onPress={() => navigation.navigate('Exercises')}
           >
-            <Ionicons name="leaf-outline" size={24} color="#fff" />
+            <Ionicons name="leaf-outline" size={20} color="#fff" />
           </TouchableOpacity>
           <TouchableOpacity 
             style={styles.headerButton}
             onPress={() => navigation.navigate('Calendar')}
           >
-            <Ionicons name="calendar-outline" size={24} color="#fff" />
+            <Ionicons name="calendar-outline" size={20} color="#fff" />
           </TouchableOpacity>
         </View>
       ),
@@ -298,7 +417,7 @@ function HomeScreen({ navigation }) {
         "Enjoying some tranquility? Would you like to share what's bringing you peace?"
       ],
       Neutral: [
-        "You're feeling neutral - that's perfectly okay. Would you like to talk about your day?",
+        "You're feeling neutral - that's okay. Would you like to talk about your day?",
         "Sometimes a neutral state helps us think clearly. What's on your mind?",
         "Taking things as they come? Let me know if you'd like to explore your feelings further."
       ],
@@ -308,9 +427,9 @@ function HomeScreen({ navigation }) {
         "Thank you for sharing how you feel. Would you like to talk about what's making you sad?"
       ],
       Stressed: [
-        "I notice you're feeling stressed. Would you like to talk about what's causing this pressure?",
+        "I notice you're feeling stressed. Let's slow down. Would you like to do a quick box breathing exercise?",
         "Stress can be overwhelming. Let's work through this together - what's on your mind?",
-        "I'm here to help you manage this stress. Want to tell me what's troubling you?"
+        "I'm here to help you manage this stress. Want to tell me what's causing the pressure?"
       ]
     };
 
@@ -318,15 +437,12 @@ function HomeScreen({ navigation }) {
     return moodResponses[Math.floor(Math.random() * moodResponses.length)];
   };
 
-  // Update the mood setting logic in HomeScreen
   const handleMoodSelection = async (selectedMood) => {
     setMood(selectedMood);
     if (!auth.currentUser) return;
 
     try {
       const todayStr = new Date().toISOString().split('T')[0];
-      
-      // Save mood to unified moods collection
       const moodDocRef = doc(db, 'moods', `${auth.currentUser.uid}_${todayStr}`);
       await setDoc(moodDocRef, {
         userId: auth.currentUser.uid,
@@ -381,6 +497,8 @@ function HomeScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
+      <SafetyModal visible={showSafetyModal} onClose={() => setShowSafetyModal(false)} />
+
       <View style={styles.welcomeSection}>
         <Text style={styles.welcomeTitle}>Welcome to Sattva AI</Text>
         <Text style={styles.welcomeDescription}>
@@ -401,6 +519,24 @@ function HomeScreen({ navigation }) {
         <MoodButton emoji="😫" label="Stressed" onPress={() => handleMoodSelection('Stressed')} isSelected={mood === 'Stressed'} />
       </View>
 
+      {/* Suggestion Chips */}
+      <View style={styles.suggestionsContainer}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestionsScroll}>
+          {SUGGESTIONS.map((item, idx) => (
+            <TouchableOpacity 
+              key={idx} 
+              style={styles.suggestionChip}
+              onPress={() => handleSendDirectMessage(item.text)}
+            >
+              <Text style={styles.suggestionEmoji}>{item.emoji}</Text>
+              <Text style={styles.suggestionText}>{item.text}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      {isListening && <VoiceVisualizer />}
+
       <ScrollView 
         ref={scrollViewRef}
         style={styles.chatScrollView}
@@ -420,10 +556,10 @@ function HomeScreen({ navigation }) {
 
       <View style={styles.inputContainer}>
         <TouchableOpacity 
-          style={[styles.voiceButton, isListening && { backgroundColor: '#E88383' }]}
+          style={[styles.voiceButton, isListening && { backgroundColor: '#E88383', borderColor: '#E88383' }]}
           onPress={handleVoicePress}
         >
-          <Ionicons name={isListening ? "mic" : "mic-outline"} size={24} color="#fff" />
+          <Ionicons name={isListening ? "mic" : "mic-outline"} size={22} color="#fff" />
         </TouchableOpacity>
         
         <TextInput
@@ -446,13 +582,52 @@ function HomeScreen({ navigation }) {
 }
 
 // ChatMessage Component
-const ChatMessage = ({ message, isUser }) => {
+const ChatMessage = ({ message, isUser, onReact }) => {
+  const [showReactions, setShowReactions] = useState(false);
+  const currentReactions = message.reactions || [];
+
   return (
     <View style={[
-      styles.messageContainer,
-      isUser ? styles.userMessage : styles.aiMessage
+      styles.messageContainerWrapper,
+      isUser ? { alignItems: 'flex-end' } : { alignItems: 'flex-start' }
     ]}>
-      <Text style={styles.messageText}>{message.text}</Text>
+      <TouchableOpacity 
+        activeOpacity={0.9}
+        onLongPress={() => setShowReactions(!showReactions)}
+        style={[
+          styles.messageContainer,
+          isUser ? styles.userMessage : styles.aiMessage
+        ]}
+      >
+        <Text style={[styles.messageText, isUser && { color: '#111' }]}>{message.text}</Text>
+      </TouchableOpacity>
+
+      {/* Inline Reactions display */}
+      {currentReactions.length > 0 && (
+        <View style={styles.reactionsDisplayRow}>
+          {currentReactions.map((r, i) => (
+            <Text key={i} style={styles.reactionBadge}>{r}</Text>
+          ))}
+        </View>
+      )}
+
+      {/* Reaction picker */}
+      {showReactions && (
+        <View style={[styles.reactionPicker, isUser ? { right: 10 } : { left: 10 }]}>
+          {['❤️', '👍', '🙏', '😢', '💪'].map((emoji) => (
+            <TouchableOpacity 
+              key={emoji} 
+              style={styles.reactionPickerItem}
+              onPress={() => {
+                onReact(message.id, emoji);
+                setShowReactions(false);
+              }}
+            >
+              <Text style={{ fontSize: 16 }}>{emoji}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
     </View>
   );
 };
@@ -486,10 +661,12 @@ export default function App() {
           headerStyle: {
             backgroundColor: '#111',
             borderBottomWidth: 1,
-            borderBottomColor: '#333',
+            borderBottomColor: '#222',
+            elevation: 0,
+            shadowOpacity: 0,
           },
           headerTintColor: '#fff',
-          cardStyle: { backgroundColor: '#111' },
+          cardStyle: { backgroundColor: '#0d0d0d' },
           cardStyleInterpolator: ({ current, layouts }) => {
             return {
               cardStyle: {
@@ -620,11 +797,13 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#111',
+    backgroundColor: '#0d0d0d',
   },
   welcomeSection: {
     padding: 20,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#131313',
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
   },
   chatScrollView: {
     flex: 1,
@@ -632,83 +811,143 @@ const styles = StyleSheet.create({
   },
   chatContentContainer: {
     paddingTop: 10,
-    paddingBottom: 20,
+    paddingBottom: 25,
   },
   welcomeTitle: {
     color: ACCENT_COLOR,
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: 'bold',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   welcomeDescription: {
-    color: '#fff',
-    fontSize: 16,
-    lineHeight: 24,
-    opacity: 0.9,
+    color: '#aaa',
+    fontSize: 14,
+    lineHeight: 20,
   },
   divider: {
-    height: 2,
-    backgroundColor: ACCENT_COLOR,
-    opacity: 0.2,
-    marginTop: 15,
+    height: 1,
+    backgroundColor: '#222',
+    marginTop: 12,
   },
   title: {
     color: '#fff',
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginTop: 20,
-    marginBottom: 15,
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 15,
+    marginBottom: 10,
   },
   moodContainer: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 10,
-    paddingHorizontal: 15,
+    flexWrap: 'nowrap',
+    justifyContent: 'space-around',
+    paddingHorizontal: 10,
     marginBottom: 15,
   },
   moodButton: {
-    backgroundColor: '#222',
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderRadius: 15,
+    backgroundColor: '#151515',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 16,
     alignItems: 'center',
-    minWidth: 90,
+    width: 68,
+    borderWidth: 1,
+    borderColor: '#222',
   },
   moodButtonSelected: {
-    backgroundColor: '#333',
-    borderWidth: 2,
+    backgroundColor: '#222',
     borderColor: ACCENT_COLOR,
+    borderWidth: 1.5,
   },
   moodEmoji: {
-    fontSize: 28,
-    marginBottom: 6,
+    fontSize: 24,
+    marginBottom: 4,
   },
   moodLabel: {
     color: '#fff',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  suggestionsContainer: {
+    paddingHorizontal: 15,
+    marginBottom: 12,
+  },
+  suggestionsScroll: {
+    gap: 8,
+    paddingRight: 10,
+  },
+  suggestionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#151515',
+    borderWidth: 1,
+    borderColor: '#222',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    gap: 6,
+  },
+  suggestionEmoji: {
+    fontSize: 15,
+  },
+  suggestionText: {
+    color: '#bbb',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  voiceVisualizerContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    backgroundColor: '#131313',
+    borderRadius: 16,
+    marginHorizontal: 15,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(157, 192, 139, 0.15)',
+  },
+  voiceListeningText: {
+    color: ACCENT_COLOR,
     fontSize: 13,
+    marginBottom: 8,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+  voiceWaves: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    height: 50,
+  },
+  voiceWaveBar: {
+    width: 5,
+    borderRadius: 2.5,
+    backgroundColor: ACCENT_COLOR,
+    minHeight: 8,
   },
   inputContainer: {
     flexDirection: 'row',
-    padding: 10,
-    backgroundColor: '#1a1a1a',
+    padding: 12,
+    backgroundColor: '#131313',
     borderTopWidth: 1,
-    borderTopColor: '#333',
+    borderTopColor: '#222',
     alignItems: 'center',
     gap: 10,
   },
   chatInput: {
     flex: 1,
-    backgroundColor: '#222',
-    borderRadius: 20,
+    backgroundColor: '#1e1e1e',
+    borderRadius: 22,
     paddingHorizontal: 15,
     paddingVertical: 10,
-    fontSize: 16,
+    fontSize: 15,
     color: '#fff',
     minHeight: 40,
+    borderWidth: 1,
+    borderColor: '#2d2d2d',
   },
   sendButton: {
-    width: 60,
+    paddingHorizontal: 18,
     height: 40,
     borderRadius: 20,
     backgroundColor: ACCENT_COLOR,
@@ -716,8 +955,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   sendButtonText: {
-    fontSize: 15,
-    color: '#111',
+    fontSize: 14,
+    color: '#0d0d0d',
     fontWeight: 'bold',
   },
   headerContainer: {
@@ -729,76 +968,182 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   headerLogoContainer: {
-    backgroundColor: '#1a1a1a',
-    padding: 8,
-    borderRadius: 12,
+    backgroundColor: '#151515',
+    padding: 6,
+    borderRadius: 10,
   },
   headerLogo: {
-    width: 32,
-    height: 32,
+    width: 28,
+    height: 28,
   },
   headerAppName: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 14,
   },
   headerButtons: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginRight: 15,
   },
   headerButton: {
     padding: 8,
-    borderRadius: 20,
-    backgroundColor: '#222',
+    borderRadius: 18,
+    backgroundColor: '#151515',
+    borderWidth: 1,
+    borderColor: '#222',
   },
   typingContainer: {
     flexDirection: 'row',
-    padding: 15,
+    padding: 12,
     alignItems: 'center',
     justifyContent: 'flex-start',
-    gap: 5,
+    gap: 4,
   },
   typingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: ACCENT_COLOR,
+  },
+  messageContainerWrapper: {
+    width: '100%',
+    marginVertical: 4,
+    position: 'relative',
   },
   messageContainer: {
     maxWidth: '80%',
     padding: 12,
-    borderRadius: 15,
-    marginVertical: 4,
+    borderRadius: 18,
   },
   userMessage: {
     backgroundColor: ACCENT_COLOR,
     alignSelf: 'flex-end',
-    marginLeft: 'auto',
     marginRight: 10,
+    borderBottomRightRadius: 4,
   },
   aiMessage: {
-    backgroundColor: '#222',
+    backgroundColor: '#151515',
     alignSelf: 'flex-start',
     marginLeft: 10,
-    marginRight: 'auto',
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#222',
+    borderBottomLeftRadius: 4,
   },
   messageText: {
     color: '#fff',
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 15,
+    lineHeight: 22,
   },
   voiceButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#222',
+    backgroundColor: '#1e1e1e',
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
+    borderColor: '#2d2d2d',
+  },
+  // Reactions
+  reactionsDisplayRow: {
+    flexDirection: 'row',
+    marginTop: -8,
+    marginBottom: 5,
+    marginHorizontal: 15,
+    gap: 3,
+  },
+  reactionBadge: {
+    backgroundColor: '#222',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    fontSize: 11,
+    overflow: 'hidden',
+    borderWidth: 0.5,
     borderColor: '#333',
+    color: '#fff',
+  },
+  reactionPicker: {
+    position: 'absolute',
+    top: -42,
+    flexDirection: 'row',
+    backgroundColor: '#1f1f1f',
+    borderRadius: 20,
+    padding: 5,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#333',
+    zIndex: 999,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  reactionPickerItem: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  // Safety overlay styles
+  safetyOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 9999,
+    padding: 20,
+  },
+  safetyCard: {
+    backgroundColor: '#1c1c1c',
+    borderRadius: 24,
+    padding: 25,
+    width: '100%',
+    maxWidth: 350,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(232, 131, 131, 0.25)',
+  },
+  safetyTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#E88383',
+    marginBottom: 12,
+  },
+  safetyDescription: {
+    fontSize: 14,
+    color: '#ccc',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  safetyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    paddingVertical: 14,
+    borderRadius: 14,
+    gap: 8,
+  },
+  safetyButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  safetyCloseButton: {
+    marginTop: 15,
+    padding: 10,
+  },
+  safetyCloseText: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
 
@@ -811,6 +1156,27 @@ const generateAIResponse = async (userMessage, currentMood) => {
   
   if (msg.includes('bye') || msg.includes('goodbye')) {
     return "Take care! Remember, I'm here whenever you need support. 🌟";
+  }
+
+  // Recommendations mapping based on topics
+  if (msg.includes('breath') || msg.includes('inhale') || msg.includes('exhale')) {
+    return "Practicing deep breathing regulates your nervous system. Navigate to the Coping Exercises tab and start the Guided Box Breathing exercise! 🌬️";
+  }
+  
+  if (msg.includes('ground') || msg.includes('anxious') || msg.includes('panic') || msg.includes('overwhelmed')) {
+    return "When feelings of anxiety build, a grounding exercise helps anchor your senses. Try our interactive 5-4-3-2-1 Grounding checklist to refocus. 🧘";
+  }
+  
+  if (msg.includes('meditate') || msg.includes('meditation') || msg.includes('mindful') || msg.includes('quiet')) {
+    return "Taking a few minutes for silent meditation is a great way to center yourself. Check out our Meditation Timer in the Coping Exercises screen! 🌿";
+  }
+  
+  if (msg.includes('stats') || msg.includes('trends') || msg.includes('chart') || msg.includes('history')) {
+    return "You can check your emotional logs and insights by tapping the Stats chart icon in the top header! 📊";
+  }
+  
+  if (msg.includes('cycle') || msg.includes('period') || msg.includes('menstrual') || msg.includes('track')) {
+    return "You can log and track your period cycles alongside your moods on the Calendar screen. Tap the Calendar icon in the header! 📅";
   }
 
   const moodResponses = {
@@ -947,7 +1313,7 @@ const TypingIndicator = () => {
               transform: [{
                 translateY: dot.interpolate({
                   inputRange: [0, 1],
-                  outputRange: [0, -10]
+                  outputRange: [0, -8]
                 })
               }],
               opacity: dot.interpolate({
