@@ -1,57 +1,19 @@
-# Testing Checklist for Phase 3
-# testing 
-## Authentication
-- [ ] User can sign up
-- [ ] User can log in
-- [ ] User can log out
-- [ ] Error handling for invalid credentials
+# Testing Checklist
 
-## Mood Tracker
-- [ ] Can select different moods
-- [ ] Moods are saved to Firebase
-- [ ] Loading states show correctly
-- [ ] Error messages display correctly
-- [ ] Mood history displays correctly
+Automated: `npm test` (28 tests, 4 suites) — see `__tests__/`.
+Manual: see `TESTING_GUIDE.md` for the full script.
 
-## Calendar
-- [ ] Can mark dates
-- [ ] Marked dates persist after reload
-- [ ] Can view marked dates
-- [ ] Loading states show correctly
-- [ ] Error handling works
-- [ ] Date selection works
-- [ ] Refresh button works
+Quick pre-demo smoke test:
 
-## Voice Chat
-- [ ] Voice recognition works
-- [ ] Text display is accurate
-- [ ] Error handling works
-- [ ] Microphone permissions work
-
-## Navigation
-- [ ] Can navigate between screens
-- [ ] Header styling is consistent
-- [ ] Back navigation works
-
-## Cross-Platform Testing
-- [ ] Works on Android
-- [ ] Works on iOS
-- [ ] UI is consistent across platforms
-
-## Performance
-- [ ] App loads quickly
-- [ ] No lag when switching screens
-- [ ] Firebase operations are quick
-- [ ] No memory leaks
-
-## Error Handling
-- [ ] Network errors handled
-- [ ] Firebase errors handled
-- [ ] Input validation works
-- [ ] Error boundaries catch crashes
-
-## Security
-- [ ] Firebase rules work
-- [ ] User data is isolated
-- [ ] API keys are secured
-- [ ] No sensitive data exposed 
+- [ ] `npm run validate` passes (lint + tests)
+- [ ] `npm run check:ai` reports a valid key (or you accept offline mode)
+- [ ] App boots to the login screen with no console errors
+- [ ] Log in succeeds
+- [ ] Mood selection saves and produces a reply
+- [ ] Chat reply arrives and is contextual
+- [ ] Crisis phrase opens the resources modal
+- [ ] "this is too much" does *not* trigger a greeting
+- [ ] Calendar shows today's mood
+- [ ] Stats charts render with an insight card
+- [ ] Exercises: breathing timer runs
+- [ ] Log out works

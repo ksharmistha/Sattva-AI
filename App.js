@@ -1,11 +1,14 @@
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ScrollView, ActivityIndicator, Alert, Animated, Platform, Linking } from 'react-native';
-import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, Image, ScrollView, ActivityIndicator, Alert, Animated, Platform, Linking, KeyboardAvoidingView, useWindowDimensions } from 'react-native';
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import ErrorBoundary from 'react-native-error-boundary';
 import CalendarScreen from './CalendarScreen';
 import { collection, query, where, orderBy, limit, getDocs, doc, getDoc, updateDoc, addDoc, setDoc } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, firebaseReady } from './firebase';
 import { Ionicons } from '@expo/vector-icons';
 import ExercisesScreen from './ExercisesScreen';
 import StatsScreen from './StatsScreen';
@@ -15,9 +18,16 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { auth } from './firebase';
 import AuthScreen from './AuthScreen';
 
-// Speech & HF AI Imports
+// Speech & AI Imports
 import { useSpeechToText } from './speech';
-import { queryHuggingFace } from './huggingface';
+import { generateChatReply, isGeminiConfigured } from './lib/ai';
+import {
+  detectCrisis,
+  CRISIS_RESOURCES,
+  CRISIS_REPLY,
+  NOT_AN_EMERGENCY_SERVICE,
+} from './lib/safety';
+import { missingFirebaseKeys } from './lib/env';
 
 const Stack = createStackNavigator();
 const ACCENT_COLOR = '#9DC08B';
@@ -73,7 +83,7 @@ const MoodButton = ({ emoji, label, onPress, isSelected }) => {
   });
 
   return (
-    <TouchableOpacity onPress={handlePress}>
+    <TouchableOpacity onPress={handlePress} style={styles.moodButtonWrapper}>
       <Animated.View 
         style={[
           styles.moodButton,
@@ -149,40 +159,62 @@ const VoiceVisualizer = () => {
 };
 
 // Safety Escalation Modal Component
+// Content is driven by lib/safety.js so the resource list and the
+// "not an emergency service" wording live in one place.
 const SafetyModal = ({ visible, onClose }) => {
   if (!visible) return null;
+
+  const openResource = async (url) => {
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        Alert.alert('Unavailable here', `This device cannot open ${url}. Please dial or visit it manually.`);
+        return;
+      }
+      await Linking.openURL(url);
+    } catch (err) {
+      Alert.alert('Unavailable here', `Could not open ${url}. Please dial or visit it manually.`);
+    }
+  };
+
   return (
     <View style={styles.safetyOverlay}>
-      <View style={styles.safetyCard}>
-        <Ionicons name="warning-outline" size={48} color="#E88383" style={{ marginBottom: 15 }} />
-        <Text style={styles.safetyTitle}>We Care About You</Text>
-        <Text style={styles.safetyDescription}>
-          It sounds like you might be going through a very difficult time. Please know that you are not alone, and there is immediate support available.
-        </Text>
-        
-        <TouchableOpacity 
-          style={[styles.safetyButton, { backgroundColor: '#E88383' }]} 
-          onPress={() => Linking.openURL('tel:988')}
-        >
-          <Ionicons name="call-outline" size={20} color="#fff" />
-          <Text style={styles.safetyButtonText}>Call 988 Suicide Line</Text>
-        </TouchableOpacity>
+      <ScrollView
+        contentContainerStyle={styles.safetyScroll}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.safetyCard}>
+          <Ionicons name="heart-circle-outline" size={48} color="#E88383" style={{ marginBottom: 15 }} />
+          <Text style={styles.safetyTitle}>We Care About You</Text>
+          <Text style={styles.safetyDescription}>
+            It sounds like you might be going through something really difficult. You do not have
+            to face it on your own, and support is available right now.
+          </Text>
 
-        <TouchableOpacity 
-          style={[styles.safetyButton, { backgroundColor: '#333', marginTop: 10 }]} 
-          onPress={() => Linking.openURL('sms:741741')}
-        >
-          <Ionicons name="chatbubble-ellipses-outline" size={20} color="#fff" />
-          <Text style={styles.safetyButtonText}>Text HOME to 741741</Text>
-        </TouchableOpacity>
+          {CRISIS_RESOURCES.map((resource, idx) => (
+            <TouchableOpacity
+              key={resource.id}
+              style={[
+                styles.safetyButton,
+                { backgroundColor: resource.primary ? '#E88383' : '#333' },
+                idx > 0 && { marginTop: 10 },
+              ]}
+              onPress={() => openResource(resource.url)}
+              accessibilityRole="button"
+              accessibilityLabel={resource.label}
+            >
+              <Ionicons name={resource.icon} size={20} color="#fff" />
+              <Text style={styles.safetyButtonText}>{resource.label}</Text>
+            </TouchableOpacity>
+          ))}
 
-        <TouchableOpacity 
-          style={styles.safetyCloseButton} 
-          onPress={onClose}
-        >
-          <Text style={styles.safetyCloseText}>Back to App</Text>
-        </TouchableOpacity>
-      </View>
+          <Text style={styles.safetyDisclaimer}>{NOT_AN_EMERGENCY_SERVICE}</Text>
+
+          <TouchableOpacity style={styles.safetyCloseButton} onPress={onClose}>
+            <Text style={styles.safetyCloseText}>Back to App</Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
     </View>
   );
 };
@@ -190,24 +222,35 @@ const SafetyModal = ({ visible, onClose }) => {
 // HomeScreen component
 function HomeScreen({ navigation }) {
   const scrollViewRef = useRef(null);
+  const { width } = useWindowDimensions();
+  const isWide = width > 700;
   const [mood, setMood] = useState(null);
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [isMessageLoading, setIsMessageLoading] = useState(false);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(null);
   const [showSafetyModal, setShowSafetyModal] = useState(false);
+  const [voiceNotice, setVoiceNotice] = useState(null);
   
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
 
-  // Speech Recognition hook
+  // Speech Recognition hook.
+  // The callbacks are memoised: passing fresh inline arrows caused the hook's
+  // effect to tear down and rebuild the recogniser on every render.
+  const handleSpeechResults = useCallback((text) => {
+    setMessage(text);
+  }, []);
+
+  const handleSpeechError = useCallback((err) => {
+    console.warn('Speech recognition error:', err);
+    setVoiceNotice('Voice input stopped. You can type your message instead.');
+  }, []);
+
   const { isListening, startListening, stopListening, isSupported } = useSpeechToText({
-    onResults: (text) => {
-      setMessage(text);
-    },
-    onError: (err) => {
-      console.warn('Speech recognition error:', err);
-      Alert.alert('Voice Input Info', 'Speech recognition was interrupted. You can type your message.');
-    }
+    onResults: handleSpeechResults,
+    onError: handleSpeechError,
   });
 
   // Add animation effect
@@ -226,84 +269,104 @@ function HomeScreen({ navigation }) {
     ]).start();
   }, []);
 
-  const checkDistress = (text) => {
-    const distressKeywords = ['suicide', 'self-harm', 'kill myself', 'end my life', 'hurt myself', 'want to die', 'overdose', 'cut myself', 'hang myself'];
-    const cleaned = text.toLowerCase();
-    return distressKeywords.some(kw => cleaned.includes(kw));
+  // Persists one chat turn and returns the Firestore id (or null if the write
+  // failed - a failed write must not block the conversation).
+  const persistMessage = async (text, isUser, timestamp) => {
+    try {
+      const ref = await addDoc(collection(db, 'messages'), {
+        userId: auth.currentUser.uid,
+        text,
+        isUser,
+        timestamp,
+        reactions: [],
+      });
+      return ref.id;
+    } catch (err) {
+      console.error('Failed to persist message:', err);
+      return null;
+    }
   };
 
   const handleSendDirectMessage = async (msgText) => {
     const trimmedMessage = msgText.trim();
-    if (!trimmedMessage) return;
-    if (!auth.currentUser) return;
+    if (!trimmedMessage || isMessageLoading) return;
+    if (!auth?.currentUser) return;
 
-    // Check distress for crisis trigger
-    if (checkDistress(trimmedMessage)) {
-      setShowSafetyModal(true);
-    }
-
-    const userMessageId = Date.now().toString();
+    const userMessageId = `local-${Date.now()}`;
     const userTimestamp = new Date().toISOString();
-    
+
     const userMessage = {
       id: userMessageId,
       text: trimmedMessage,
       isUser: true,
       timestamp: userTimestamp,
-      reactions: []
+      reactions: [],
     };
 
+    // Snapshot the transcript before this turn so it can be used as AI context.
+    const priorHistory = messages;
+
+    setMessage('');
+    setMessages((prev) => [...prev, userMessage]);
+    setIsMessageLoading(true);
+
     try {
-      setIsMessageLoading(true);
-      setMessage('');  // Clear input
-      setMessages(prev => [...prev, userMessage]);  // Add user message immediately
-      
-      // Save User Message to Firestore
-      const userDocRef = await addDoc(collection(db, 'messages'), {
-        userId: auth.currentUser.uid,
-        text: trimmedMessage,
-        isUser: true,
-        timestamp: userTimestamp,
-        reactions: []
-      });
-
-      // Get AI response
-      let aiResponseText = await queryHuggingFace(trimmedMessage, mood);
-      
-      // Fallback to local rule-based engine if HF fails or offline
-      if (!aiResponseText) {
-        aiResponseText = await generateAIResponse(trimmedMessage, mood);
+      const userDocId = await persistMessage(trimmedMessage, true, userTimestamp);
+      if (userDocId) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === userMessageId ? { ...m, id: userDocId } : m))
+        );
       }
-      
-      const aiTimestamp = new Date().toISOString();
-      
-      // Save AI Message to Firestore
-      const aiDocRef = await addDoc(collection(db, 'messages'), {
-        userId: auth.currentUser.uid,
-        text: aiResponseText,
-        isUser: false,
-        timestamp: aiTimestamp,
-        reactions: []
-      });
 
-      if (aiResponseText) {
-        const aiMessage = {
-          id: aiDocRef.id,
+      // SAFETY LAYER - runs before the model sees anything. On a crisis signal
+      // we surface resources and reply with a fixed, reviewed message rather
+      // than letting a language model improvise in a high-stakes moment.
+      const isCrisis = detectCrisis(trimmedMessage);
+
+      let aiResponseText;
+      let replySource;
+
+      if (isCrisis) {
+        setShowSafetyModal(true);
+        aiResponseText = CRISIS_REPLY;
+        replySource = 'safety';
+      } else {
+        const reply = await generateChatReply({
+          message: trimmedMessage,
+          mood,
+          history: priorHistory,
+        });
+        aiResponseText = reply.text;
+        replySource = reply.source;
+      }
+
+      const aiTimestamp = new Date().toISOString();
+      const aiDocId = await persistMessage(aiResponseText, false, aiTimestamp);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: aiDocId || `local-${Date.now()}-ai`,
           text: aiResponseText,
           isUser: false,
           timestamp: aiTimestamp,
-          reactions: []
-        };
-        // Update messages: swap temporary user message ID with firestore ID, and append AI message
-        setMessages(prev => {
-          const updated = prev.map(m => m.id === userMessageId ? { ...m, id: userDocRef.id } : m);
-          return [...updated, aiMessage];
-        });
-      }
-
+          reactions: [],
+          source: replySource,
+        },
+      ]);
     } catch (err) {
       console.error('Message Error:', err);
-      Alert.alert('Send Error', 'Failed to send message. Please check your network.');
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `local-${Date.now()}-err`,
+          text: "I couldn't reach my services just then. Please check your connection and try again — your message was saved.",
+          isUser: false,
+          timestamp: new Date().toISOString(),
+          reactions: [],
+          source: 'error',
+        },
+      ]);
     } finally {
       setIsMessageLoading(false);
     }
@@ -314,6 +377,10 @@ function HomeScreen({ navigation }) {
   };
 
   const handleReaction = async (messageId, reaction) => {
+    // Messages that failed to persist only exist locally, so there is no
+    // document to update.
+    if (String(messageId).startsWith('local-')) return;
+
     try {
       const messageRef = doc(db, 'messages', messageId);
       const messageDoc = await getDoc(messageRef);
@@ -337,10 +404,18 @@ function HomeScreen({ navigation }) {
     }
   };
 
-  // Load messages on mount and when user logs in
+  // Load the recent transcript once the user is available.
+  // This query needs a composite index on (userId ASC, timestamp DESC) -
+  // see firestore.indexes.json.
   useEffect(() => {
+    let cancelled = false;
+
     const loadMessages = async () => {
-      if (!auth.currentUser) return;
+      if (!auth?.currentUser) {
+        setIsHistoryLoading(false);
+        return;
+      }
+
       try {
         const q = query(
           collection(db, 'messages'),
@@ -349,17 +424,33 @@ function HomeScreen({ navigation }) {
           limit(50)
         );
         const querySnapshot = await getDocs(q);
-        const fetchedMessages = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
+        if (cancelled) return;
+
+        const fetchedMessages = querySnapshot.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
         }));
         setMessages(fetchedMessages.reverse());
+        setHistoryError(null);
       } catch (err) {
         console.error('Error loading messages:', err);
+        if (cancelled) return;
+        // failed-precondition means the composite index is missing, which is
+        // the single most common first-run problem. Say so plainly.
+        setHistoryError(
+          err?.code === 'failed-precondition'
+            ? 'Chat history needs a Firestore index. Run "firebase deploy --only firestore:indexes" (see README).'
+            : 'Could not load your earlier messages. You can still chat below.'
+        );
+      } finally {
+        if (!cancelled) setIsHistoryLoading(false);
       }
     };
 
     loadMessages();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Customize header with Logout and other navigation options
@@ -439,8 +530,10 @@ function HomeScreen({ navigation }) {
 
   const handleMoodSelection = async (selectedMood) => {
     setMood(selectedMood);
-    if (!auth.currentUser) return;
+    if (!auth?.currentUser) return;
 
+    // One mood document per user per day. setDoc overwrites, so re-selecting
+    // a mood later the same day updates the entry rather than duplicating it.
     try {
       const todayStr = new Date().toISOString().split('T')[0];
       const moodDocRef = doc(db, 'moods', `${auth.currentUser.uid}_${todayStr}`);
@@ -448,46 +541,41 @@ function HomeScreen({ navigation }) {
         userId: auth.currentUser.uid,
         date: todayStr,
         mood: selectedMood,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
     } catch (err) {
       console.error('Error saving mood selection:', err);
+      Alert.alert('Could not save mood', 'Your mood was not saved. Please check your connection.');
     }
-    
-    // Add AI response for mood selection
+
     const aiResponseText = getMoodSelectionResponse(selectedMood);
     const aiTimestamp = new Date().toISOString();
-    let aiMessageId = Date.now().toString() + '-ai';
+    const aiDocId = await persistMessage(aiResponseText, false, aiTimestamp);
 
-    try {
-      const aiDocRef = await addDoc(collection(db, 'messages'), {
-        userId: auth.currentUser.uid,
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: aiDocId || `local-${Date.now()}-mood`,
         text: aiResponseText,
         isUser: false,
         timestamp: aiTimestamp,
-        reactions: []
-      });
-      aiMessageId = aiDocRef.id;
-    } catch (err) {
-      console.error('Error saving mood AI message:', err);
-    }
-    
-    const aiMessage = {
-      id: aiMessageId,
-      text: aiResponseText,
-      isUser: false,
-      timestamp: aiTimestamp,
-      reactions: []
-    };
-    
-    setMessages(prev => [...prev, aiMessage]);
+        reactions: [],
+      },
+    ]);
   };
 
   const handleVoicePress = () => {
+    setVoiceNotice(null);
+
     if (!isSupported) {
-      Alert.alert('Voice Input', 'Speech recognition is not supported in this browser/device.');
+      setVoiceNotice(
+        Platform.OS === 'web'
+          ? 'Voice input needs a Chromium-based browser (Chrome or Edge). You can type instead.'
+          : 'Voice input needs a development build with microphone access. You can type instead.'
+      );
       return;
     }
+
     if (isListening) {
       stopListening();
     } else {
@@ -495,89 +583,160 @@ function HomeScreen({ navigation }) {
     }
   };
 
+  // On wide screens the chat is centred in a phone-width column instead of
+  // stretching edge to edge, which looked broken in the web demo.
+  const contentStyle = [styles.contentColumn, isWide && styles.contentColumnWide];
+
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       <SafetyModal visible={showSafetyModal} onClose={() => setShowSafetyModal(false)} />
 
-      <View style={styles.welcomeSection}>
-        <Text style={styles.welcomeTitle}>Welcome to Sattva AI</Text>
-        <Text style={styles.welcomeDescription}>
-          Your personal AI companion for emotional well-being and mental health support.
-        </Text>
-        <View style={styles.divider} />
-      </View>
-
-      <View style={{ paddingHorizontal: 20 }}>
-        <Text style={styles.title}>How are you feeling?</Text>
-      </View>
-      
-      <View style={styles.moodContainer}>
-        <MoodButton emoji="😊" label="Happy" onPress={() => handleMoodSelection('Happy')} isSelected={mood === 'Happy'} />
-        <MoodButton emoji="😌" label="Calm" onPress={() => handleMoodSelection('Calm')} isSelected={mood === 'Calm'} />
-        <MoodButton emoji="😐" label="Neutral" onPress={() => handleMoodSelection('Neutral')} isSelected={mood === 'Neutral'} />
-        <MoodButton emoji="😔" label="Sad" onPress={() => handleMoodSelection('Sad')} isSelected={mood === 'Sad'} />
-        <MoodButton emoji="😫" label="Stressed" onPress={() => handleMoodSelection('Stressed')} isSelected={mood === 'Stressed'} />
-      </View>
-
-      {/* Suggestion Chips */}
-      <View style={styles.suggestionsContainer}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestionsScroll}>
-          {SUGGESTIONS.map((item, idx) => (
-            <TouchableOpacity 
-              key={idx} 
-              style={styles.suggestionChip}
-              onPress={() => handleSendDirectMessage(item.text)}
-            >
-              <Text style={styles.suggestionEmoji}>{item.emoji}</Text>
-              <Text style={styles.suggestionText}>{item.text}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
-
-      {isListening && <VoiceVisualizer />}
-
-      <ScrollView 
-        ref={scrollViewRef}
-        style={styles.chatScrollView}
-        contentContainerStyle={styles.chatContentContainer}
-        onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
-        {messages.map((msg) => (
-          <ChatMessage 
-            key={msg.id}
-            message={msg}
-            isUser={msg.isUser}
-            onReact={handleReaction}
-          />
-        ))}
-        {isMessageLoading && <TypingIndicator />}
-      </ScrollView>
+        <View style={contentStyle}>
+          <View style={styles.welcomeSection}>
+            <Text style={styles.welcomeTitle}>Welcome to Sattva AI</Text>
+            <Text style={styles.welcomeDescription}>
+              Your personal AI companion for emotional well-being and mental health support.
+            </Text>
+            <View style={styles.divider} />
+          </View>
 
-      <View style={styles.inputContainer}>
-        <TouchableOpacity 
-          style={[styles.voiceButton, isListening && { backgroundColor: '#E88383', borderColor: '#E88383' }]}
-          onPress={handleVoicePress}
-        >
-          <Ionicons name={isListening ? "mic" : "mic-outline"} size={22} color="#fff" />
-        </TouchableOpacity>
-        
-        <TextInput
-          style={[styles.chatInput, { color: '#fff' }]}
-          placeholder={isListening ? "Listening..." : "Type a message..."}
-          placeholderTextColor="#666"
-          value={message}
-          onChangeText={setMessage}
-        />
-        
-        <TouchableOpacity 
-          style={styles.sendButton}
-          onPress={handleSendMessage}
-        >
-          <Text style={styles.sendButtonText}>Send</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+          <View style={{ paddingHorizontal: 20 }}>
+            <Text style={styles.title}>How are you feeling?</Text>
+          </View>
+
+          <View style={styles.moodContainer}>
+            <MoodButton emoji="😊" label="Happy" onPress={() => handleMoodSelection('Happy')} isSelected={mood === 'Happy'} />
+            <MoodButton emoji="😌" label="Calm" onPress={() => handleMoodSelection('Calm')} isSelected={mood === 'Calm'} />
+            <MoodButton emoji="😐" label="Neutral" onPress={() => handleMoodSelection('Neutral')} isSelected={mood === 'Neutral'} />
+            <MoodButton emoji="😔" label="Sad" onPress={() => handleMoodSelection('Sad')} isSelected={mood === 'Sad'} />
+            <MoodButton emoji="😫" label="Stressed" onPress={() => handleMoodSelection('Stressed')} isSelected={mood === 'Stressed'} />
+          </View>
+
+          {/* Suggestion Chips */}
+          <View style={styles.suggestionsContainer}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestionsScroll}>
+              {SUGGESTIONS.map((item) => (
+                <TouchableOpacity
+                  key={item.text}
+                  style={styles.suggestionChip}
+                  onPress={() => handleSendDirectMessage(item.text)}
+                  disabled={isMessageLoading}
+                >
+                  <Text style={styles.suggestionEmoji}>{item.emoji}</Text>
+                  <Text style={styles.suggestionText}>{item.text}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
+          {isListening && <VoiceVisualizer />}
+
+          {voiceNotice && (
+            <View style={styles.noticeBar}>
+              <Ionicons name="information-circle-outline" size={16} color="#E8C983" />
+              <Text style={styles.noticeText}>{voiceNotice}</Text>
+              <TouchableOpacity onPress={() => setVoiceNotice(null)} hitSlop={8}>
+                <Ionicons name="close" size={16} color="#888" />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {historyError && (
+            <View style={styles.noticeBar}>
+              <Ionicons name="cloud-offline-outline" size={16} color="#E8C983" />
+              <Text style={styles.noticeText}>{historyError}</Text>
+            </View>
+          )}
+
+          <ScrollView
+            ref={scrollViewRef}
+            style={styles.chatScrollView}
+            contentContainerStyle={styles.chatContentContainer}
+            keyboardShouldPersistTaps="handled"
+            onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+          >
+            {isHistoryLoading ? (
+              <View style={styles.chatPlaceholder}>
+                <ActivityIndicator color={ACCENT_COLOR} />
+                <Text style={styles.chatPlaceholderText}>Loading your conversation…</Text>
+              </View>
+            ) : messages.length === 0 ? (
+              <View style={styles.chatPlaceholder}>
+                <Ionicons name="chatbubbles-outline" size={30} color="#333" />
+                <Text style={styles.chatPlaceholderText}>
+                  Pick a mood above, tap a suggestion, or just say what is on your mind.
+                </Text>
+              </View>
+            ) : (
+              messages.map((msg) => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  isUser={msg.isUser}
+                  onReact={handleReaction}
+                />
+              ))
+            )}
+            {isMessageLoading && <TypingIndicator />}
+          </ScrollView>
+
+          <View style={styles.inputContainer}>
+            <TouchableOpacity
+              style={[styles.voiceButton, isListening && { backgroundColor: '#E88383', borderColor: '#E88383' }]}
+              onPress={handleVoicePress}
+              accessibilityRole="button"
+              accessibilityLabel={isListening ? 'Stop voice input' : 'Start voice input'}
+            >
+              <Ionicons name={isListening ? 'mic' : 'mic-outline'} size={22} color="#fff" />
+            </TouchableOpacity>
+
+            <TextInput
+              style={styles.chatInput}
+              placeholder={isListening ? 'Listening…' : 'Type a message…'}
+              placeholderTextColor="#666"
+              value={message}
+              onChangeText={setMessage}
+              onSubmitEditing={handleSendMessage}
+              // react-native-web does not reliably fire onSubmitEditing, so
+              // Enter is handled explicitly for the browser demo.
+              onKeyPress={(e) => {
+                if (e?.nativeEvent?.key === 'Enter') {
+                  e.preventDefault?.();
+                  handleSendMessage();
+                }
+              }}
+              returnKeyType="send"
+              multiline={false}
+              editable={!isMessageLoading}
+            />
+
+            <TouchableOpacity
+              style={[styles.sendButton, (isMessageLoading || !message.trim()) && styles.sendButtonDisabled]}
+              onPress={handleSendMessage}
+              disabled={isMessageLoading || !message.trim()}
+              accessibilityRole="button"
+              accessibilityLabel="Send message"
+            >
+              {isMessageLoading ? (
+                <ActivityIndicator size="small" color="#0d0d0d" />
+              ) : (
+                <Text style={styles.sendButtonText}>Send</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.inputDisclaimer}>
+            Sattva AI is a wellbeing companion, not a therapist or emergency service.
+            {!isGeminiConfigured() && ' Running in offline mode — add a Gemini API key for live AI replies.'}
+          </Text>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -600,6 +759,9 @@ const ChatMessage = ({ message, isUser, onReact }) => {
         ]}
       >
         <Text style={[styles.messageText, isUser && { color: '#111' }]}>{message.text}</Text>
+        {message.source === 'offline' && (
+          <Text style={styles.offlineTag}>offline reply</Text>
+        )}
       </TouchableOpacity>
 
       {/* Inline Reactions display */}
@@ -632,12 +794,47 @@ const ChatMessage = ({ message, isUser, onReact }) => {
   );
 };
 
+// Shown when .env is missing or incomplete, instead of letting Firebase throw
+// opaque errors deep inside the auth flow.
+const SetupScreen = () => (
+  <View style={styles.setupContainer}>
+    <Ionicons name="construct-outline" size={44} color={ACCENT_COLOR} />
+    <Text style={styles.setupTitle}>Configuration needed</Text>
+    <Text style={styles.setupBody}>
+      Sattva AI could not start because its Firebase configuration is missing.
+    </Text>
+    <View style={styles.setupCard}>
+      <Text style={styles.setupStep}>1. cp .env.example .env</Text>
+      <Text style={styles.setupStep}>2. Fill in your Firebase web config</Text>
+      <Text style={styles.setupStep}>3. Restart the dev server</Text>
+    </View>
+    <Text style={styles.setupHint}>Missing keys: {missingFirebaseKeys().join(', ') || 'unknown'}</Text>
+  </View>
+);
+
+// Fallback for any uncaught render error, so a crash in one screen does not
+// leave the user staring at a blank white page during a demo.
+const CrashFallback = ({ error, resetError }) => (
+  <View style={styles.setupContainer}>
+    <Ionicons name="alert-circle-outline" size={44} color="#E88383" />
+    <Text style={styles.setupTitle}>Something went wrong</Text>
+    <Text style={styles.setupBody}>{error?.message || 'An unexpected error occurred.'}</Text>
+    <TouchableOpacity style={styles.setupButton} onPress={resetError}>
+      <Text style={styles.setupButtonText}>Try again</Text>
+    </TouchableOpacity>
+  </View>
+);
+
 // Main App component with Firebase Auth Conditional Navigation
-export default function App() {
+function RootNavigator() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
+    if (!firebaseReady) {
+      setAuthLoading(false);
+      return undefined;
+    }
     const unsubscribe = onAuthStateChanged(auth, (usr) => {
       setUser(usr);
       setAuthLoading(false);
@@ -645,10 +842,13 @@ export default function App() {
     return unsubscribe;
   }, []);
 
+  if (!firebaseReady) return <SetupScreen />;
+
   if (authLoading) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color={ACCENT_COLOR} />
+        <Text style={styles.chatPlaceholderText}>Starting Sattva AI…</Text>
       </View>
     );
   }
@@ -794,10 +994,155 @@ export default function App() {
   );
 }
 
+// GestureHandlerRootView is required by @react-navigation/stack for swipe
+// gestures; SafeAreaProvider keeps content clear of notches and home bars.
+export default function App() {
+  return (
+    <GestureHandlerRootView style={styles.flex}>
+      <SafeAreaProvider>
+        <ErrorBoundary FallbackComponent={CrashFallback}>
+          <RootNavigator />
+        </ErrorBoundary>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
+}
+
 const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: '#0d0d0d',
+  },
+  // Keeps the chat readable on wide/desktop viewports instead of stretching
+  // a phone layout across the whole screen.
+  contentColumn: {
+    flex: 1,
+    width: '100%',
+  },
+  contentColumnWide: {
+    maxWidth: 620,
+    alignSelf: 'center',
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: '#1a1a1a',
+  },
+  noticeBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 15,
+    marginBottom: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(232, 201, 131, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(232, 201, 131, 0.2)',
+  },
+  noticeText: {
+    flex: 1,
+    color: '#d8c9a3',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  chatPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 30,
+    gap: 10,
+  },
+  chatPlaceholderText: {
+    color: '#666',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 19,
+    marginTop: 8,
+  },
+  inputDisclaimer: {
+    color: '#5a5a5a',
+    fontSize: 10.5,
+    lineHeight: 15,
+    textAlign: 'center',
+    paddingHorizontal: 20,
+    paddingBottom: 10,
+    backgroundColor: '#131313',
+  },
+  sendButtonDisabled: {
+    opacity: 0.45,
+  },
+  offlineTag: {
+    color: '#666',
+    fontSize: 10,
+    marginTop: 6,
+    fontStyle: 'italic',
+  },
+  // Setup / crash screens
+  setupContainer: {
+    flex: 1,
+    backgroundColor: '#0d0d0d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 30,
+    gap: 12,
+  },
+  setupTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  setupBody: {
+    color: '#aaa',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  setupCard: {
+    backgroundColor: '#151515',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#222',
+    padding: 16,
+    gap: 8,
+    marginTop: 8,
+  },
+  setupStep: {
+    color: '#ccc',
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  setupHint: {
+    color: '#666',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  setupButton: {
+    marginTop: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 26,
+    borderRadius: 14,
+    backgroundColor: ACCENT_COLOR,
+  },
+  setupButtonText: {
+    color: '#0d0d0d',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  safetyScroll: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 30,
+  },
+  safetyDisclaimer: {
+    color: '#8a8a8a',
+    fontSize: 11.5,
+    lineHeight: 17,
+    textAlign: 'center',
+    marginTop: 16,
   },
   welcomeSection: {
     padding: 20,
@@ -839,17 +1184,23 @@ const styles = StyleSheet.create({
   moodContainer: {
     flexDirection: 'row',
     flexWrap: 'nowrap',
-    justifyContent: 'space-around',
-    paddingHorizontal: 10,
+    justifyContent: 'space-between',
+    paddingHorizontal: 15,
+    gap: 6,
     marginBottom: 15,
+  },
+  moodButtonWrapper: {
+    flex: 1,
   },
   moodButton: {
     backgroundColor: '#151515',
     paddingVertical: 10,
-    paddingHorizontal: 8,
+    paddingHorizontal: 4,
     borderRadius: 16,
     alignItems: 'center',
-    width: 68,
+    justifyContent: 'center',
+    minWidth: 60,
+    maxWidth: 78,
     borderWidth: 1,
     borderColor: '#222',
   },
@@ -1146,129 +1497,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
-
-const generateAIResponse = async (userMessage, currentMood) => {
-  const msg = userMessage.toLowerCase();
-  
-  if (msg.includes('hi') || msg.includes('hello') || msg.includes('hey')) {
-    return "Hello! How can I support you today? 😊";
-  }
-  
-  if (msg.includes('bye') || msg.includes('goodbye')) {
-    return "Take care! Remember, I'm here whenever you need support. 🌟";
-  }
-
-  // Recommendations mapping based on topics
-  if (msg.includes('breath') || msg.includes('inhale') || msg.includes('exhale')) {
-    return "Practicing deep breathing regulates your nervous system. Navigate to the Coping Exercises tab and start the Guided Box Breathing exercise! 🌬️";
-  }
-  
-  if (msg.includes('ground') || msg.includes('anxious') || msg.includes('panic') || msg.includes('overwhelmed')) {
-    return "When feelings of anxiety build, a grounding exercise helps anchor your senses. Try our interactive 5-4-3-2-1 Grounding checklist to refocus. 🧘";
-  }
-  
-  if (msg.includes('meditate') || msg.includes('meditation') || msg.includes('mindful') || msg.includes('quiet')) {
-    return "Taking a few minutes for silent meditation is a great way to center yourself. Check out our Meditation Timer in the Coping Exercises screen! 🌿";
-  }
-  
-  if (msg.includes('stats') || msg.includes('trends') || msg.includes('chart') || msg.includes('history')) {
-    return "You can check your emotional logs and insights by tapping the Stats chart icon in the top header! 📊";
-  }
-  
-  if (msg.includes('cycle') || msg.includes('period') || msg.includes('menstrual') || msg.includes('track')) {
-    return "You can log and track your period cycles alongside your moods on the Calendar screen. Tap the Calendar icon in the header! 📅";
-  }
-
-  const moodResponses = {
-    Happy: {
-      default: [
-        "That's wonderful! What's making you feel particularly happy today?",
-        "I love seeing you in good spirits! Would you like to share more?",
-        "Your positive energy is infectious! What's the highlight of your day?",
-      ],
-      why: [
-        "It's great that you're feeling happy! Sometimes understanding what makes us happy helps us create more joyful moments.",
-        "Exploring what brings us joy can help us appreciate these moments even more. Would you like to share?",
-      ],
-      help: [
-        "While you're feeling good, this might be a great time to plan some future activities that bring you joy!",
-        "It's wonderful that you're feeling happy! Would you like to explore ways to maintain this positive energy?",
-      ],
-    },
-    Sad: {
-      default: [
-        "I hear you, and it's okay to feel sad. Would you like to talk about what's troubling you?",
-        "I'm here to listen without judgment. What's on your mind?",
-        "Sometimes sharing our feelings can help lighten the load. What's making you feel this way?",
-      ],
-      why: [
-        "It's brave of you to explore these feelings. Would you like to talk about what might be causing this sadness?",
-        "Understanding our sadness can be the first step toward feeling better. What do you think triggered these feelings?",
-      ],
-      help: [
-        "Let's work through this together. Would you like to try some simple activities that might help lift your mood?",
-        "There are several ways we can approach this. Would you like to explore some coping strategies?",
-      ],
-    },
-    Stressed: {
-      default: [
-        "I understand stress can feel overwhelming. What's causing you the most pressure right now?",
-        "Let's take a deep breath together. Would you like to talk about what's stressing you?",
-        "Sometimes breaking down our stressors can make them feel more manageable. What's on your mind?",
-      ],
-      why: [
-        "Understanding our stress triggers can help us manage them better. What do you think is contributing to your stress?",
-        "Let's explore what's causing this stress. Is it something specific, or a combination of factors?",
-      ],
-      help: [
-        "I know some relaxation techniques that might help. Would you like to try one?",
-        "There are several ways we can approach stress management. Would you like to explore some strategies?",
-      ],
-    },
-    Calm: {
-      default: [
-        "It's wonderful that you're feeling calm. What's helping you maintain this peaceful state?",
-        "Moments of calm are precious. How did you achieve this sense of peace?",
-        "This is a great state of mind. What activities helped you reach this calm?",
-      ],
-      why: [
-        "Understanding what brings us calm can help us return to this state when we need it. What worked for you?",
-        "It's valuable to recognize what helps us feel peaceful. Would you like to explore what contributed to this?",
-      ],
-      help: [
-        "Would you like to learn some techniques to help maintain this calm state?",
-        "This calm state is a great foundation. Would you like to explore ways to extend it?",
-      ],
-    },
-    Neutral: {
-      default: [
-        "A neutral state can be a good place for reflection. How would you like to feel?",
-        "Sometimes neutral is exactly what we need. What's on your mind?",
-        "This could be a good time to set intentions. What would you like to focus on?",
-      ],
-      why: [
-        "Neutral moments can be valuable for self-reflection. Would you like to explore what you're thinking about?",
-        "Sometimes a neutral state helps us see things clearly. What's on your mind?",
-      ],
-      help: [
-        "Would you like to explore ways to move toward a positive direction?",
-        "This could be a good time to try something new. Would you like some suggestions?",
-      ],
-    },
-  };
-
-  const moodSet = moodResponses[currentMood] || moodResponses.Neutral;
-  
-  if (msg.includes('why')) {
-    return moodSet.why[Math.floor(Math.random() * moodSet.why.length)];
-  }
-  
-  if (msg.includes('help') || msg.includes('what should i do')) {
-    return moodSet.help[Math.floor(Math.random() * moodSet.help.length)];
-  }
-  
-  return moodSet.default[Math.floor(Math.random() * moodSet.default.length)];
-};
 
 const TypingIndicator = () => {
   const dots = [

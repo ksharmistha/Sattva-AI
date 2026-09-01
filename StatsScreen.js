@@ -6,11 +6,11 @@ import {
   ScrollView, 
   Dimensions, 
   ActivityIndicator, 
-  TouchableOpacity, 
-  Alert 
+  TouchableOpacity 
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { generateWellnessInsight } from './lib/ai';
 import { db, auth } from './firebase';
 import Svg, { Circle, G } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
@@ -116,6 +116,8 @@ export default function StatsScreen({ navigation }) {
   const [weeklyChartData, setWeeklyChartData] = useState(null);
   const [moodCounts, setMoodCounts] = useState({ Happy: 0, Calm: 0, Neutral: 0, Sad: 0, Stressed: 0 });
   const [aiReport, setAiReport] = useState('');
+  const [insightSource, setInsightSource] = useState('offline'); // 'gemini' | 'offline'
+  const [insightLoading, setInsightLoading] = useState(false);
   const [recommendedExercise, setRecommendedExercise] = useState(null);
   
   const [stats, setStats] = useState({
@@ -268,8 +270,9 @@ export default function StatsScreen({ navigation }) {
         positiveDays: current7Avg > 0 ? `${Math.round((positiveDaysCount / 7) * 100)}%` : '0%'
       });
 
-      // 4. Generate Local AI Wellness Insights Report
-      generateWellnessReport(allLogs, current7Avg, distributionCounts);
+      // 4. Wellness insight. Charts and quick stats above are computed locally
+      // and never depend on this - the insight is layered on top.
+      generateWellnessReport(allLogs, current7Avg, distributionCounts, trendPercentageStr);
 
     } catch (err) {
       console.error('Error computing stats:', err);
@@ -279,9 +282,10 @@ export default function StatsScreen({ navigation }) {
     }
   };
 
-  const generateWellnessReport = (allLogs, current7Avg, distribution) => {
+  const generateWellnessReport = async (allLogs, current7Avg, distribution, trendStr) => {
     if (allLogs.length === 0) {
-      setAiReport("Start logging your daily moods and cycles to let Sattva AI compile emotional wellness reports for you.");
+      setAiReport('Start logging your daily moods to let Sattva AI build a wellness reflection for you.');
+      setInsightSource('offline');
       setRecommendedExercise(null);
       return;
     }
@@ -349,8 +353,31 @@ export default function StatsScreen({ navigation }) {
       recommendation = { title: '5-4-3-2-1 Grounding', id: 'grounding', icon: 'compass-outline' };
     }
 
+    // The locally computed paragraph is always available. It is shown
+    // immediately, then replaced if Gemini returns something better.
     setAiReport(reportText);
+    setInsightSource('offline');
     setRecommendedExercise(recommendation);
+
+    // Only aggregate numbers leave the device - no message text, no journal
+    // entries, no cycle data, no dates.
+    setInsightLoading(true);
+    try {
+      const { text, source } = await generateWellnessInsight(
+        {
+          averageMood: current7Avg.toFixed(1),
+          trend: trendStr || '0%',
+          primaryMood,
+          daysLogged: new Set(allLogs.map((log) => log.date)).size,
+          hardestDay: worstDayIdx !== -1 ? weekdays[worstDayIdx] : null,
+        },
+        reportText
+      );
+      setAiReport(text);
+      setInsightSource(source);
+    } finally {
+      setInsightLoading(false);
+    }
   };
 
   const chartConfig = {
@@ -407,13 +434,34 @@ export default function StatsScreen({ navigation }) {
               </View>
             </View>
 
-            {/* AI Wellness Report */}
+            {/* AI Wellness Insight.
+                Everything above this card is computed on-device from your
+                logs. This card is the only interpreted, AI-written section,
+                and it is labelled as such. */}
             <View style={styles.aiReportCard}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-                <Ionicons name="analytics" size={20} color={ACCENT_COLOR} />
-                <Text style={styles.aiReportTitle}>AI Wellness Insights</Text>
+              <View style={styles.aiReportHeader}>
+                <Ionicons name="sparkles-outline" size={20} color={ACCENT_COLOR} />
+                <Text style={styles.aiReportTitle}>Wellness Insight</Text>
+                <View
+                  style={[
+                    styles.sourceBadge,
+                    insightSource === 'gemini' ? styles.sourceBadgeAi : styles.sourceBadgeLocal,
+                  ]}
+                >
+                  <Text style={styles.sourceBadgeText}>
+                    {insightSource === 'gemini' ? 'AI generated' : 'On-device'}
+                  </Text>
+                </View>
               </View>
+
               <Text style={styles.aiReportContent}>{aiReport}</Text>
+
+              {insightLoading && (
+                <View style={styles.insightLoadingRow}>
+                  <ActivityIndicator size="small" color={ACCENT_COLOR} />
+                  <Text style={styles.insightLoadingText}>Refining with AI…</Text>
+                </View>
+              )}
               
               {recommendedExercise && (
                 <View style={styles.recommendationBox}>
@@ -552,6 +600,43 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     borderWidth: 1,
     borderColor: '#222',
+  },
+  aiReportHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 10,
+    flexWrap: 'wrap',
+  },
+  sourceBadge: {
+    marginLeft: 'auto',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  sourceBadgeAi: {
+    backgroundColor: 'rgba(157, 192, 139, 0.12)',
+    borderColor: 'rgba(157, 192, 139, 0.35)',
+  },
+  sourceBadgeLocal: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderColor: '#333',
+  },
+  sourceBadgeText: {
+    color: '#bbb',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  insightLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  insightLoadingText: {
+    color: '#777',
+    fontSize: 12,
   },
   aiReportTitle: {
     color: '#fff',

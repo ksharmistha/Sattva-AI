@@ -464,7 +464,7 @@ export default function ExercisesScreen() {
                   <Text style={styles.answersHeader}>Your Senses Summary:</Text>
                   {Object.keys(groundingAnswers).reverse().map((step) => (
                     <Text key={step} style={styles.summaryAnswerLine}>
-                      {step} {step == 5 ? 'Seen' : step == 4 ? 'Touched' : step == 3 ? 'Heard' : step == 2 ? 'Smelled' : 'Tasted'}: {groundingAnswers[step].join(', ')}
+                      {step} {step === 5 ? 'Seen' : step === 4 ? 'Touched' : step === 3 ? 'Heard' : step === 2 ? 'Smelled' : 'Tasted'}: {groundingAnswers[step].join(', ')}
                     </Text>
                   ))}
                 </View>

@@ -1,36 +1,45 @@
 {
   "expo": {
-    "name": "SattvaAI",
-    "slug": "SattvaAI",
+    "name": "Sattva AI",
+    "slug": "sattvaai",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/logo.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "scheme": "sattvaai",
     "splash": {
-      "image": "./assets/logo.png",
+      "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#1a1a1a"
+      "backgroundColor": "#0d0d0d"
     },
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
-      "icon": "./assets/logo.png"
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/logo.png",
-        "backgroundColor": "#1a1a1a"
+      "bundleIdentifier": "com.sattvaai.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Allow Sattva AI to access the microphone so you can speak instead of typing.",
+        "NSSpeechRecognitionUsageDescription": "Allow Sattva AI to transcribe your speech so you can talk through how you are feeling."
       }
     },
+    "android": {
+      "package": "com.sattvaai.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo.png",
+        "backgroundColor": "#0d0d0d"
+      },
+      "permissions": ["android.permission.RECORD_AUDIO"]
+    },
     "web": {
-      "favicon": "./assets/logo.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
     },
     "plugins": [
       [
         "@react-native-voice/voice",
         {
-          "microphonePermission": "Allow Sattva AI to access the microphone for voice analysis.",
-          "speechRecognitionPermission": "Allow Sattva AI to analyze speech patterns for emotional insights."
+          "microphonePermission": "Allow Sattva AI to access the microphone for voice input.",
+          "speechRecognitionPermission": "Allow Sattva AI to transcribe your speech so you can talk instead of type."
         }
       ]
     ]

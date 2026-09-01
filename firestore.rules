@@ -1,18 +1,66 @@
 rules_version = '2';
+
+// Sattva AI Firestore rules
+//
+// Model: every document carries a `userId` field (or, for cycle_settings, uses
+// the uid as the document id). A user may only ever read or write their own
+// data. Nothing is world-readable.
+//
+// Changes from the previous version:
+//   * Added cycle_logs and cycle_settings, which the app writes but the old
+//     rules never covered - those writes were being denied.
+//   * moods now allows update. The app writes one document per user per day at
+//     a deterministic id ({uid}_{date}), so logging a second mood on the same
+//     day is an update, not a create. The old create-only rule rejected it.
+//   * Removed the `menstrual` collection, which no code path touches. Cycle
+//     data lives in cycle_logs.
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /moods/{document} {
-      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
-      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+
+    // True when the request is authenticated as the owner named in the
+    // document already stored.
+    function ownsExisting() {
+      return request.auth != null && resource.data.userId == request.auth.uid;
     }
-    match /menstrual/{document} {
-      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
-      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+
+    // True when the incoming document is stamped with the caller's own uid.
+    // Prevents a user from writing a document attributed to someone else.
+    function ownsIncoming() {
+      return request.auth != null && request.resource.data.userId == request.auth.uid;
     }
-    match /messages/{document} {
-      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
-      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
-      allow update: if request.auth != null && (resource.data.userId == request.auth.uid || request.resource.data.userId == request.auth.uid);
+
+    // Chat transcript. Update is allowed so message reactions can be toggled,
+    // but the userId may not be reassigned.
+    match /messages/{messageId} {
+      allow read: if ownsExisting();
+      allow create: if ownsIncoming();
+      allow update: if ownsExisting() && ownsIncoming();
+      allow delete: if ownsExisting();
     }
+
+    // One mood entry per user per day, id = {uid}_{YYYY-MM-DD}.
+    match /moods/{moodId} {
+      allow read: if ownsExisting();
+      allow create: if ownsIncoming();
+      allow update: if ownsExisting() && ownsIncoming();
+      allow delete: if ownsExisting();
+    }
+
+    // One cycle entry per user per day, id = {uid}_{YYYY-MM-DD}.
+    match /cycle_logs/{logId} {
+      allow read: if ownsExisting();
+      allow create: if ownsIncoming();
+      allow update: if ownsExisting() && ownsIncoming();
+      allow delete: if ownsExisting();
+    }
+
+    // Cycle length / period length preferences. Document id IS the uid, and
+    // the body has no userId field, so ownership is checked against the id.
+    match /cycle_settings/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Anything not matched above is denied.
   }
-} 
+}
