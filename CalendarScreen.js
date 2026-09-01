@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, Text, TouchableOpacity, Animated, Easing, ActivityIndicator, Alert, ScrollView, TextInput } from 'react-native';
 import { Calendar } from 'react-native-calendars';
-import { collection, query, where, getDocs, doc, setDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { db, auth } from './firebase';
 import { Ionicons } from '@expo/vector-icons';
+import { addDays, getDaysInRange, toMonthKey, todayKey } from './lib/date';
 
 const ACCENT_COLOR = '#9DC08B';  // Mint green
 
@@ -22,30 +23,13 @@ const COLOR_PREDICTED_PERIOD = 'rgba(232, 131, 131, 0.4)'; // Pink for predicted
 const COLOR_FERTILE = 'rgba(157, 192, 139, 0.3)'; // Light green/teal for fertile window
 const COLOR_OVULATION = '#55ad8f'; // Darker teal for ovulation day
 
-// Date Helper Functions
-const addDays = (dateStr, days) => {
-  const date = new Date(dateStr + 'T00:00:00');
-  date.setDate(date.getDate() + days);
-  return date.toISOString().split('T')[0];
-};
-
-const getDaysInRange = (startStr, endStr) => {
-  const dates = [];
-  let curr = new Date(startStr + 'T00:00:00');
-  const end = new Date(endStr + 'T00:00:00');
-  while (curr <= end) {
-    dates.push(curr.toISOString().split('T')[0]);
-    curr.setDate(curr.getDate() + 1);
-  }
-  return dates;
-};
 
 export default function CalendarScreen() {
   const [activeTab, setActiveTab] = useState('mood'); // 'mood' or 'cycle'
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
-  const [currentMonth, setCurrentMonth] = useState(new Date().toISOString().substring(0, 7));
+  const [currentMonth, setCurrentMonth] = useState(toMonthKey());
 
   // Mood data states
   const [moodLogs, setMoodLogs] = useState({});
@@ -111,7 +95,7 @@ export default function CalendarScreen() {
 
   // 1. Fetch Mood Data
   const fetchMoodData = async () => {
-    if (!auth.currentUser) return;
+    if (!auth?.currentUser) return;
     try {
       const q = query(
         collection(db, 'moods'),
@@ -140,7 +124,7 @@ export default function CalendarScreen() {
 
   // 2. Fetch Cycle Data
   const fetchCycleData = async () => {
-    if (!auth.currentUser) return;
+    if (!auth?.currentUser) return;
     try {
       // Fetch cycle settings
       const settingsDocRef = doc(db, 'cycle_settings', auth.currentUser.uid);
@@ -179,7 +163,7 @@ export default function CalendarScreen() {
 
   // 3. Save Mood
   const logMoodForDate = async (selectedMood) => {
-    if (!auth.currentUser || !selectedDate) return;
+    if (!auth?.currentUser || !selectedDate) return;
 
     try {
       const updatedMoods = { ...moodLogs, [selectedDate]: selectedMood };
@@ -213,7 +197,7 @@ export default function CalendarScreen() {
 
   // 4. Save Cycle Logs
   const logCycleData = async (isPeriodStart, flow, symptoms) => {
-    if (!auth.currentUser || !selectedDate) return;
+    if (!auth?.currentUser || !selectedDate) return;
 
     try {
       const updatedCycle = {
@@ -221,22 +205,31 @@ export default function CalendarScreen() {
         [selectedDate]: { isPeriodStart, flow, symptoms }
       };
 
-      // Clean if no period and no symptoms logged
-      if (!isPeriodStart && flow === 'None' && symptoms.length === 0) {
+      // An entry with no period flag, no flow and no symptoms is a cleared day.
+      const isCleared = !isPeriodStart && flow === 'None' && symptoms.length === 0;
+      if (isCleared) {
         delete updatedCycle[selectedDate];
       }
 
       setCycleLogs(updatedCycle);
 
       const logDocRef = doc(db, 'cycle_logs', `${auth.currentUser.uid}_${selectedDate}`);
-      await setDoc(logDocRef, {
-        userId: auth.currentUser.uid,
-        date: selectedDate,
-        isPeriodStart,
-        flow,
-        symptoms,
-        timestamp: new Date().toISOString()
-      });
+
+      if (isCleared) {
+        // Previously this still wrote an empty document, so local state and
+        // Firestore diverged: the cleared day reappeared as a blank entry on
+        // the next load. Remove the document instead.
+        await deleteDoc(logDocRef);
+      } else {
+        await setDoc(logDocRef, {
+          userId: auth.currentUser.uid,
+          date: selectedDate,
+          isPeriodStart,
+          flow,
+          symptoms,
+          timestamp: new Date().toISOString()
+        });
+      }
 
     } catch (err) {
       console.error('Error saving cycle log:', err);
@@ -246,7 +239,7 @@ export default function CalendarScreen() {
 
   // 5. Save Settings
   const saveCycleSettings = async () => {
-    if (!auth.currentUser) return;
+    if (!auth?.currentUser) return;
     const cLen = parseInt(tempCycleLength, 10);
     const pLen = parseInt(tempPeriodLength, 10);
 

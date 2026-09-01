@@ -19,7 +19,7 @@ Sattva AI aims at the gap in between: an always-available, judgement-free compan
 | Area | What it does |
 |---|---|
 | **AI companion** | Conversational support powered by Google Gemini, with a purpose-written wellness persona and short-term conversation memory. Degrades gracefully to an on-device reply engine when offline or unconfigured. |
-| **Crisis safety layer** | Deterministic pattern matching that runs *before* the AI. Surfaces real crisis resources (988, Crisis Text Line, international helpline finder) and replies with a fixed, reviewed message rather than improvising. |
+| **Crisis safety layer** | Deterministic two-tier pattern matching that runs *before* the AI. Surfaces real crisis resources (988, Crisis Text Line, international helpline finder) and replies with a fixed, reviewed message rather than improvising. |
 | **Mood tracking** | Five-mood daily logging from the home screen or the calendar, stored one entry per user per day. |
 | **Calendar** | Colour-coded mood history plus menstrual cycle logging with period, fertile-window and ovulation predictions derived from your configured cycle length. |
 | **Coping exercises** | Animated box-breathing timer, interactive 5-4-3-2-1 grounding checklist, and a meditation timer with rotating prompts. Links out to curated relaxation playlists. |
@@ -53,6 +53,7 @@ Sattva AI is a **client-only application**. There is no custom backend server �
 │    ai.js       Gemini provider + offline fallback        │
 │    prompts.js  system prompts / AI persona               │
 │    safety.js   crisis detection + resources              │
+│    date.js     local-timezone date keys                  │
 │  firebase.js   Firestore + Auth bootstrap                │
 │  speech.js     cross-platform speech-to-text hook        │
 └───────────────┬─────────────────────────┬────────────────┘
@@ -73,6 +74,12 @@ Sattva AI is a **client-only application**. There is no custom backend server �
 **AI failure is never a dead end.** If Gemini is unconfigured, rate-limited, offline or slow (15s timeout), `generateChatReply()` falls back to an on-device rule-based engine and tags the reply `offline`. The app is fully demoable with no API key at all.
 
 **Calculated vs. interpreted data are visually separated.** On the Stats screen, charts and quick stats are computed on-device from your logs. The AI insight sits in its own card with an `AI generated` / `On-device` badge, so it is never mistaken for a measurement.
+
+**Days are local, instants are UTC.** Firestore document ids use a calendar day
+key (`{uid}_2026-09-02`). Those keys are formatted from local calendar fields in
+`lib/date.js`, never via `toISOString()` — which converts to UTC first and, east
+of UTC, silently shifts every key back a day. Event `timestamp` fields are true
+instants and do still use `toISOString()`.
 
 **Minimal data leaves the device for AI insights.** The Stats insight request sends only aggregate numbers — average mood index, week-over-week trend, most frequent mood, days logged, lowest-scoring weekday. No message text, no journal content, no cycle data, no dates.
 
@@ -226,12 +233,23 @@ Without the indexes, chat history and the stats dashboard will fail to load; the
 npm test
 ```
 
-28 tests across 4 suites:
+94 tests across 7 suites:
 
-- `safety.test.js` — crisis detection: true positives, ordinary distress that must *not* trigger, and discussion-vs-disclosure cases.
-- `ai.test.js` — offline reply engine word-boundary matching, Gemini history normalisation, graceful degradation.
-- `gemini.test.js` — Gemini wiring against a mocked SDK: system prompt, mood injection, history sanitisation, and fallback on error/empty/timeout.
-- `screens.test.js` — render smoke tests for every screen plus the full navigation tree.
+| Suite | Covers |
+|---|---|
+| `safety.test.js` | Crisis detection in both directions: disclosures that must always fire, discussion that must not, and ordinary distress that must stay quiet. |
+| `date.test.js` | Local-timezone date keys, cycle arithmetic, month/year/leap-year boundaries. |
+| `ai.test.js` | Offline reply engine word-boundary matching, Gemini history normalisation, graceful degradation. |
+| `gemini.test.js` | Gemini wiring against a mocked SDK: system prompt, mood injection, history sanitisation, fallback on error/empty/timeout. |
+| `gemini-contract.test.js` | The **real** SDK: that the enums, model params and `startChat` shapes we use actually exist. Catches API drift that mocks cannot. |
+| `exercises.test.js` | Box-breathing phase machine, round counting, completion, pause, timer cleanup; meditation countdown. Driven with fake timers. |
+| `screens.test.js` | Render smoke tests for every screen plus the full navigation tree. |
+
+The date suite is timezone-sensitive by design. To confirm it holds where you are:
+
+```bash
+TZ=Asia/Kolkata npm test
+```
 
 See `TESTING_GUIDE.md` for the manual QA script.
 
@@ -241,7 +259,7 @@ See `TESTING_GUIDE.md` for the manual QA script.
 
 1. **The Gemini API key ships in the client bundle.** Acceptable for a local demo and a project presentation; move it behind a proxy before any public distribution. `lib/ai.js` is structured so this is a one-function change.
 2. **Native voice input requires a development build.** `@react-native-voice/voice` contains native code and does not work in Expo Go. On web it requires a Chromium-based browser (Chrome/Edge); Safari and Firefox fall back to typing with an in-app notice.
-3. **Crisis detection is pattern-based, not clinical.** It matches phrasing with word boundaries and stands down on discussion-style context, but it is a demo-grade heuristic — it will miss indirect phrasing and is not a risk assessment tool.
+3. **Crisis detection is pattern-based, not clinical.** It uses two tiers: unambiguous first-person phrasing always fires, while bare topic words (`suicide`, `overdose`, `self-harm`) stand down only on a clear discussion signal. It deliberately biases toward showing resources — an unnecessary modal is a far smaller harm than a missed disclosure — but it will still miss indirect phrasing and is not a risk assessment tool.
 4. **Crisis resources are US-centric.** 988 and Crisis Text Line are US services; an international helpline finder is included, but the list is not localised by region.
 5. **Chat history is capped at the 50 most recent messages,** and only the last 12 turns are sent to the model as context.
 6. **Cycle predictions assume a regular cycle** projected from the most recent logged period. They are informational only and not a contraceptive or diagnostic aid.

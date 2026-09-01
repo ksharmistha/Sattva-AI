@@ -1,6 +1,6 @@
 # Testing Checklist
 
-Automated: `npm test` (28 tests, 4 suites) — see `__tests__/`.
+Automated: `npm test` (94 tests, 7 suites) — see `__tests__/`.
 Manual: see `TESTING_GUIDE.md` for the full script.
 
 Quick pre-demo smoke test:

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   Text, 
@@ -11,6 +11,7 @@ import {
 import { LineChart } from 'react-native-chart-kit';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { generateWellnessInsight } from './lib/ai';
+import { toDateKey, todayKey, daysAgoKey } from './lib/date';
 import { db, auth } from './firebase';
 import Svg, { Circle, G } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
@@ -126,12 +127,18 @@ export default function StatsScreen({ navigation }) {
     positiveDays: '0%'
   });
 
+  const mountedRef = useRef(true);
+
   useEffect(() => {
+    mountedRef.current = true;
     fetchStats();
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   const fetchStats = async () => {
-    if (!auth.currentUser) {
+    if (!auth?.currentUser) {
       setLoading(false);
       return;
     }
@@ -152,7 +159,7 @@ export default function StatsScreen({ navigation }) {
         allLogs.push(doc.data());
       });
 
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = todayKey();
       
       // Calculate today's logs
       const todayLogs = allLogs.filter(log => log.date === todayStr);
@@ -183,7 +190,7 @@ export default function StatsScreen({ navigation }) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         last7Days.push({
-          dateStr: d.toISOString().split('T')[0],
+          dateStr: toDateKey(d),
           label: d.toLocaleDateString([], { weekday: 'short' })
         });
       }
@@ -248,7 +255,7 @@ export default function StatsScreen({ navigation }) {
       for (let i = 13; i >= 7; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
-        prev7Days.push(d.toISOString().split('T')[0]);
+        prev7Days.push(toDateKey(d));
       }
       const prevLogs = allLogs.filter(log => prev7Days.includes(log.date));
       const prevAvg = prevLogs.length > 0
@@ -272,7 +279,13 @@ export default function StatsScreen({ navigation }) {
 
       // 4. Wellness insight. Charts and quick stats above are computed locally
       // and never depend on this - the insight is layered on top.
-      generateWellnessReport(allLogs, current7Avg, distributionCounts, trendPercentageStr);
+      // Deliberately not awaited: the charts and quick stats above are already
+      // computed, so the screen finishes loading while the insight resolves
+      // behind its own spinner. Rejections are caught so a failure here can
+      // never surface as an unhandled promise rejection.
+      generateWellnessReport(allLogs, current7Avg, distributionCounts, trendPercentageStr).catch(
+        (err) => console.error('Wellness report failed:', err)
+      );
 
     } catch (err) {
       console.error('Error computing stats:', err);
@@ -361,6 +374,14 @@ export default function StatsScreen({ navigation }) {
 
     // Only aggregate numbers leave the device - no message text, no journal
     // entries, no cycle data, no dates.
+    // Count distinct days logged within the last 7 only - the prompt describes
+    // this figure as "days logged in the last 7", so an all-time count would
+    // hand the model a number that contradicts its own label.
+    const windowStart = daysAgoKey(6);
+    const daysLoggedThisWeek = new Set(
+      allLogs.filter((log) => log.date && log.date >= windowStart).map((log) => log.date)
+    ).size;
+
     setInsightLoading(true);
     try {
       const { text, source } = await generateWellnessInsight(
@@ -368,15 +389,20 @@ export default function StatsScreen({ navigation }) {
           averageMood: current7Avg.toFixed(1),
           trend: trendStr || '0%',
           primaryMood,
-          daysLogged: new Set(allLogs.map((log) => log.date)).size,
+          daysLogged: daysLoggedThisWeek,
           hardestDay: worstDayIdx !== -1 ? weekdays[worstDayIdx] : null,
         },
         reportText
       );
+      if (!mountedRef.current) return;
       setAiReport(text);
       setInsightSource(source);
+    } catch (err) {
+      // generateWellnessInsight already falls back internally; this is a last
+      // resort so a throw can never leave the spinner running forever.
+      console.error('Wellness insight failed:', err);
     } finally {
-      setInsightLoading(false);
+      if (mountedRef.current) setInsightLoading(false);
     }
   };
 

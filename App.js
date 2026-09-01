@@ -28,6 +28,7 @@ import {
   NOT_AN_EMERGENCY_SERVICE,
 } from './lib/safety';
 import { missingFirebaseKeys } from './lib/env';
+import { todayKey } from './lib/date';
 
 const Stack = createStackNavigator();
 const ACCENT_COLOR = '#9DC08B';
@@ -535,7 +536,7 @@ function HomeScreen({ navigation }) {
     // One mood document per user per day. setDoc overwrites, so re-selecting
     // a mood later the same day updates the entry rather than duplicating it.
     try {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = todayKey();
       const moodDocRef = doc(db, 'moods', `${auth.currentUser.uid}_${todayStr}`);
       await setDoc(moodDocRef, {
         userId: auth.currentUser.uid,
